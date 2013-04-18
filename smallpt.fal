@@ -1,0 +1,194 @@
+#!/usr/local/bin/falcon
+
+// smallpt.fal - a Falcon port of 'smallpt' global illumination
+// cf. http://www.kevinbeason.com/smallpt/
+
+class Vec(x_, y_, z_)
+    x = x_;
+    y = y_;
+    z = z_;
+
+    function __add(b): return Vec(self.x + b.x, self.y + b.y, self.z + b.z)
+    function __sub(b): return Vec(self.x - b.x, self.y - b.y, self.z - b.z)
+    function __mul(b): return Vec(self.x * b, self.y * b, self.z * b)
+    function mult(b): return Vec(self.x * b.x, self.y * b.y, self.z * b.z)
+    function norm()
+	l = sqrt(self.x ** 2 + self.y ** 2 + self.z ** 2)
+	self.x /= l
+	self.y /= l
+	self.z /= l
+	return self
+    end
+    function dot(b): return self.x * b.x + self.y * b.y + self.z * b.z
+    function __mod(b)
+        return Vec(self.y * b.z - self.z * b.y, self.z * b.x - self.x * b.z,
+            self.x * b.y - self.y * b.x)
+    end
+end
+
+class Ray(o, d)
+    o = o
+    d = d
+end
+
+enum Refl_t
+    DIFF
+    SPEC
+    REFR
+end
+
+const INF = 1e20
+
+class Sphere(rad_, p_, e_, c_, refl_)
+    rad = rad_
+    p = p_
+    e = e_
+    c = c_
+    refl = refl_
+
+    function intersect(r)
+	op = self.p - r.o
+	eps = 1e-4
+	b = op.dot(r.d)
+	det = b * b - op.dot(op) + self.rad ** 2
+	if det < 0: return /* 0 */ INF
+	det = sqrt(det)
+	t = b - det
+	if t > eps: return t
+	t = b + det
+	if t > eps: return t
+	return /* 0 */ INF
+    end
+end
+
+spheres = [
+    Sphere(1e5, Vec( 1e5+1,40.8,81.6), Vec(0, 0, 0),  Vec(0.75,0.25,0.25),Refl_t.DIFF),//Left
+    Sphere(1e5, Vec(-1e5+99,40.8,81.6),Vec(0, 0, 0),  Vec(0.25,0.25,0.75),Refl_t.DIFF),//Rght
+    Sphere(1e5, Vec(50,40.8, 1e5),     Vec(0, 0, 0),  Vec(0.75,0.75,0.75),Refl_t.DIFF),//Back
+    Sphere(1e5, Vec(50,40.8,-1e5+170), Vec(0, 0, 0),  Vec(0, 0, 0),       Refl_t.DIFF),//Frnt
+    Sphere(1e5, Vec(50, 1e5, 81.6),    Vec(0, 0, 0),  Vec(0.75,0.75,0.75),Refl_t.DIFF),//Botm
+    Sphere(1e5, Vec(50,-1e5+81.6,81.6),Vec(0, 0, 0),  Vec(0.75,0.75,0.75),Refl_t.DIFF),//Top
+    Sphere(16.5,Vec(27,16.5,47),       Vec(0, 0, 0),  Vec(1,1,1)*0.999,   Refl_t.SPEC),//Mirr
+    Sphere(16.5,Vec(73,16.5,78),       Vec(0, 0, 0),  Vec(1,1,1)*0.999,   Refl_t.REFR),//Glas
+    Sphere(600, Vec(50,681.6-0.27,81.6),Vec(12,12,12),Vec(0, 0, 0),       Refl_t.DIFF) //Lite
+]
+
+function clamp(x): return (x < 0) ? 0: ((x > 1) ? 1 : x)
+function toInt(x): return int(pow(clamp(x), 1 / 2.2) * 255 + 0.5)
+function intersect(r)
+    t = INF
+    id = nil	// nil for "not found"
+    for sphere in spheres
+	d = sphere.intersect(r)
+	if d < t
+	    t = d
+	    id = sphere
+	end
+    end
+    return [t, id]
+end
+
+function radiance(r, depth)
+    t = 0.0
+    obj = 0
+
+    t, obj = intersect(r)
+    if obj == nil: return Vec(0, 0, 0)
+    x = r.o + r.d * t
+    n = (x - obj.p).norm()
+    nl = n.dot(r.d) < 0 ? n : n * -1
+    f = obj.c
+    p = max(f.x, f.y, f.z)
+    depth += 1
+    if depth > 5
+	if random() < p
+	    f = f * (1 / p)
+	else
+	    return obj.e
+	end
+    end
+    if obj.refl == Refl_t.DIFF
+	r1 = 2 * PI * random()
+	r2 = random()
+	r2s = sqrt(r2);
+	w = nl
+	u = ((abs(w.x) > 0.1 ? Vec(0, 1, 0) : Vec(1, 0, 0)) % w).norm()
+	v = w % u
+	d = (u*cos(r1)*r2s + v*sin(r1)*r2s + w*sqrt(1-r2)).norm()
+	return obj.e + f.mult(radiance(Ray(x,d),depth))
+    elif obj.refl == Refl_t.SPEC
+	return obj.e + f.mult(radiance(Ray(x,r.d-n*2*n.dot(r.d)),depth))
+    end
+    reflRay = Ray(x, r.d-n*2*n.dot(r.d))
+    into = n.dot(nl) > 0
+    nc = 1
+    nt = 1.5
+    nnt = into ? nc/nt : nt/nc
+    ddn = r.d.dot(nl)
+    cos2t = 1-nnt*nnt*(1-ddn*ddn)
+    if (cos2t < 0): return obj.e + f.mult(radiance(reflRay,depth))
+    tdir = (r.d*nnt - n*((into?1:-1)*(ddn*nnt+sqrt(cos2t)))).norm()
+    a=nt-nc
+    b=nt+nc
+    R0=a*a/(b*b)
+    c = 1-(into?-ddn:tdir.dot(n))
+    Re=R0+(1-R0)*c*c*c*c*c
+    Tr=1-Re
+    P=0.25+0.5*Re
+    RP=Re/P
+    TP=Tr/(1-P)
+    return obj.e + f.mult(depth>2 ? (random()<P ?
+	radiance(reflRay,depth)*RP:radiance(Ray(x,tdir),depth)*TP) :
+	radiance(reflRay,depth)*Re+radiance(Ray(x,tdir),depth)*Tr)
+end
+
+w = int(args[0])
+h = int(args[1])
+samps = len(args) == 3 ? int(args[2]) / 4 : 1
+cam = Ray(Vec(50,52,295.6), Vec(0,-0.042612,-1).norm())
+cx = Vec(w*0.5135/h, 0, 0)
+cy = (cx % (cam.d)).norm()*0.5135
+// r = Vec(0, 0, 0)
+
+c = arrayBuffer(w * h)
+for i in [0:(w*h)]: c[i] = Vec(0, 0, 0)
+
+for y in [0:h]	// loop over image rows
+    // TODO: Output to stderror.
+    samps_four = samps * 4
+    y_percent = 100 * y / (h - 1)
+    >> @"\rRendering ($(samps_four) spp) $(y_percent:5.2r)%"
+
+    for x in [0:w]	// loop cols
+	i = (h - y - 1) * w + x
+	for sy in [0:2]	// 2x2 subpixel rows
+	    for sx in [0:2]	// 2x2 subpixel cols
+		r = Vec(0, 0, 0)
+		for s in [0:samps]
+		    r1 = 2 * random()
+		    dx = r1 < 1 ? sqrt(r1) - 1 : 1 - sqrt(2 - r1)
+		    r2 = 2 * random()
+		    dy = r2 < 1 ? sqrt(r2) - 1 : 1 - sqrt(2 - r2)
+		    d = cx*( ( (sx+0.5 + dx)/2 + x)/w - 0.5) +
+			cy*( ( (sy+0.5 + dy)/2 + y)/h - 0.5) + cam.d;
+		    r = r + radiance(Ray(cam.o+d*140,d.norm()),0)*(1/samps);
+		end
+		c[i] = c[i] + Vec(clamp(r.x), clamp(r.y), clamp(r.z)) * 0.25
+	    end
+	end
+    end
+end
+
+f = OutputStream("image.ppm")
+f.write(@"P3\n$(w) $(h)\n255\n")
+for v in c
+    r = toInt(v.x)
+    g = toInt(v.y)
+    b = toInt(v.z)
+    f.write(@"$(r) $(g) $(b) ")
+end
+f.close()
+
+> "\nexiting..."
+
+// eof	vim:set syntax=falcon:
